@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NY Handball Rally</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="game-shell">
+      <section class="scorebar" aria-label="Scoreboard">
+        <div>
+          <span class="label">Player</span>
+          <strong id="playerScore">0</strong>
+        </div>
+        <div class="status" id="statusText">Press Space to serve</div>
+        <div>
+          <span class="label">CPU</span>
+          <strong id="cpuScore">0</strong>
+        </div>
+      </section>
+
+      <canvas id="gameCanvas" width="960" height="680" aria-label="New York handball game court"></canvas>
+
+      <section class="shotbar" aria-label="Shot controls">
+        <button id="normalShot" type="button" data-shot="normal">Regular <kbd>Left Click</kbd></button>
+        <button id="killShot" type="button" data-shot="kill">Kill <kbd>Right Click</kbd></button>
+      </section>
+
+      <section class="controls" aria-label="Controls">
+        <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move</div>
+        <div>Mouse aim</div>
+        <div><kbd>Left Click</kbd> regular</div>
+        <div><kbd>Right Click</kbd> kill</div>
+        <div><kbd>R</kbd> restart</div>
+      </section>
+    </main>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.164.1/build/three.module.js"
+        }
+      }
+    </script>
+    <script type="module" src="game.js"></script>
+  </body>
+</html>
