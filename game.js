@@ -12,10 +12,10 @@ const aimStickEl = document.querySelector("#aimStick");
 const chargeMeterEl = document.querySelector("#chargeMeter");
 const chargeFillEl = document.querySelector("#chargeFill");
 const roomInput = document.querySelector("#roomInput");
-const serverInput = document.querySelector("#serverInput");
 const hostBtn = document.querySelector("#hostBtn");
 const joinBtn = document.querySelector("#joinBtn");
 const networkStatusEl = document.querySelector("#networkStatus");
+const DEFAULT_MULTIPLAYER_SERVER = "wss://handballgame.onrender.com";
 
 const court = {
   left: 90,
@@ -147,6 +147,9 @@ const online = {
   role: "offline",
   room: "",
   peerConnected: false,
+  targetUrl: "",
+  hasJoined: false,
+  lastError: "",
   lastSend: 0,
   remoteInput: {
     moveX: 0,
@@ -437,7 +440,7 @@ function updateOnlineUI() {
   if (opponentLabelEl) opponentLabelEl.textContent = opponentName();
   if (!networkStatusEl) return;
   if (online.role === "offline") {
-    networkStatusEl.textContent = "Offline";
+    networkStatusEl.textContent = online.lastError || "Offline";
   } else if (online.role === "host") {
     networkStatusEl.textContent = online.peerConnected
       ? `Hosting ${online.room}: connected`
@@ -1365,15 +1368,16 @@ function sendOnline(payload) {
 }
 
 function multiplayerServerUrl() {
-  const saved = localStorage.getItem("handballServerUrl") || "";
-  const raw = (serverInput?.value || saved).trim();
-  if (serverInput && !serverInput.value && saved) serverInput.value = saved;
+  const params = new URLSearchParams(location.search);
+  const raw = (params.get("server") || "").trim();
   if (!raw) {
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    return `${protocol}//${location.host}`;
+    if (location.hostname === "localhost" || location.hostname === "127.0.0.1") {
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      return `${protocol}//${location.host}`;
+    }
+    return DEFAULT_MULTIPLAYER_SERVER;
   }
 
-  localStorage.setItem("handballServerUrl", raw);
   if (raw.startsWith("wss://") || raw.startsWith("ws://")) return raw;
   if (raw.startsWith("https://")) return `wss://${raw.slice("https://".length)}`;
   if (raw.startsWith("http://")) return `ws://${raw.slice("http://".length)}`;
@@ -1382,14 +1386,21 @@ function multiplayerServerUrl() {
 
 function connectOnline(role) {
   const room = (roomInput?.value || "handball").trim() || "handball";
-  const socket = new WebSocket(multiplayerServerUrl());
+  const targetUrl = multiplayerServerUrl();
+  if (online.socket) online.socket.close();
+  const socket = new WebSocket(targetUrl);
   online.socket = socket;
   online.role = role;
   online.room = room;
   online.peerConnected = false;
+  online.targetUrl = targetUrl;
+  online.hasJoined = false;
+  online.lastError = "";
+  setStatus(`Connecting to ${targetUrl}`, 1200);
   updateOnlineUI();
 
   socket.addEventListener("open", () => {
+    setStatus(`Joining room ${room}`, 900);
     sendOnline({ type: "join", room, role });
   });
 
@@ -1403,12 +1414,27 @@ function connectOnline(role) {
     handleOnlineMessage(data);
   });
 
+  socket.addEventListener("error", () => {
+    if (online.socket !== socket) return;
+    online.lastError = `Connection failed: ${online.targetUrl}`;
+    updateOnlineUI();
+    setStatus("Could not connect to multiplayer server", 1500);
+  });
+
   socket.addEventListener("close", () => {
+    if (online.socket !== socket) return;
+    const failedBeforeJoin = !online.hasJoined;
     online.role = "offline";
     online.peerConnected = false;
     online.socket = null;
+    if (failedBeforeJoin && !online.lastError) {
+      online.lastError = `Disconnected: ${online.targetUrl}`;
+    }
     updateOnlineUI();
-    setStatus("Online disconnected", 900);
+    setStatus(
+      failedBeforeJoin ? "Online failed. Check server URL or wake Render." : "Online disconnected",
+      1400,
+    );
   });
 }
 
@@ -1416,7 +1442,9 @@ function handleOnlineMessage(data) {
   if (data.type === "joined") {
     online.role = data.role;
     online.room = data.room;
+    online.hasJoined = true;
     online.peerConnected = false;
+    online.lastError = "";
     updateOnlineUI();
     if (online.role === "host") {
       restartGame();
@@ -1459,6 +1487,8 @@ function handleOnlineMessage(data) {
   }
 
   if (online.role === "guest" && data.type === "snapshot") {
+    online.peerConnected = true;
+    updateOnlineUI();
     applySnapshot(data.state);
   }
 }
@@ -1727,10 +1757,6 @@ if (hostBtn) {
 
 if (joinBtn) {
   joinBtn.addEventListener("click", () => connectOnline("guest"));
-}
-
-if (serverInput) {
-  serverInput.value = localStorage.getItem("handballServerUrl") || "";
 }
 
 resizeRenderer();
