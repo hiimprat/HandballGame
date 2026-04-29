@@ -40,6 +40,8 @@ const FLOOR_HEIGHT = 0.23; // ball radius in world units (also rest height)
 const SWING_HEIGHT = 1.2; // approximate hand height when contacting the ball
 const COURT_TO_WORLD_DEPTH = world.depth / 514; // (court.front - court.wallY) = 514
 const FLOOR_BOUNCE_BOOST = 1.22;
+const ACTIVE_SIDE_MARGIN = 88;
+const ACTIVE_BACK_MARGIN = 70;
 
 const keys = new Set();
 const targetScore = 11;
@@ -151,6 +153,8 @@ const online = {
   hasJoined: false,
   lastError: "",
   lastSend: 0,
+  lastInputSend: 0,
+  remoteState: null,
   remoteInput: {
     moveX: 0,
     moveY: 0,
@@ -259,7 +263,7 @@ const materials = {
   player: new THREE.MeshStandardMaterial({ color: player.color, roughness: 0.62 }),
   cpu: new THREE.MeshStandardMaterial({ color: cpu.color, roughness: 0.62 }),
   skin: new THREE.MeshStandardMaterial({ color: 0xfff0bd, roughness: 0.45 }),
-  ball: new THREE.MeshStandardMaterial({ color: 0xe84f45, roughness: 0.36 }),
+  ball: new THREE.MeshStandardMaterial({ color: 0x2f86ff, roughness: 0.36 }),
   aim: new THREE.LineDashedMaterial({ color: 0xf2ca72, dashSize: 0.24, gapSize: 0.18 }),
   flash: new THREE.MeshBasicMaterial({ color: 0xf2ca72, transparent: true, opacity: 0 }),
 };
@@ -872,10 +876,10 @@ function updatePlayer(dt) {
   const isWaitingToServe = !ball.live && serving === "player";
   const isWaitingToReceive = !ball.live && serving === "cpu";
   const minY = isWaitingToReceive ? court.serviceLine + 20 : court.shortLine + 24;
-  const maxY = isWaitingToServe ? court.serviceLine - 26 : court.front - 30;
-  // Allow stepping ~30 court units past either side wall to chase off-court balls.
-  const minX = isWaitingToServe || isWaitingToReceive ? court.left + 36 : court.left - 30;
-  const maxX = isWaitingToServe || isWaitingToReceive ? court.right - 36 : court.right + 30;
+  const maxY = isWaitingToServe ? court.serviceLine - 26 : ball.live ? court.front + ACTIVE_BACK_MARGIN : court.front - 30;
+  // During a live rally, let players chase airborne balls well past the court edge.
+  const minX = isWaitingToServe || isWaitingToReceive ? court.left + 36 : court.left - ACTIVE_SIDE_MARGIN;
+  const maxX = isWaitingToServe || isWaitingToReceive ? court.right - 36 : court.right + ACTIVE_SIDE_MARGIN;
   // Charging the kill bleeds movement so the shot is a real commitment.
   const moveMul = killCharge.charging ? KILL_CHARGE_MOVE_MULT : 1;
   player.x = clamp(player.x + xDirection * player.speed * moveMul * dt, minX, maxX);
@@ -1019,11 +1023,11 @@ function updateCpu(dt) {
       targetX = 490;
       targetY = positions.receiverY - 12;
     } else if (pred) {
-      targetX = clamp(pred.x, court.left - 30, court.right + 30);
-      targetY = clamp(pred.y, court.shortLine + 24, court.front - 30);
+      targetX = clamp(pred.x, court.left - ACTIVE_SIDE_MARGIN, court.right + ACTIVE_SIDE_MARGIN);
+      targetY = clamp(pred.y, court.shortLine + 24, court.front + ACTIVE_BACK_MARGIN);
     } else {
-      targetX = clamp(ball.x + ball.vx * 0.18, court.left - 30, court.right + 30);
-      targetY = clamp(ball.y > 0 ? ball.y + 40 : positions.receiverY, court.shortLine + 24, court.front - 30);
+      targetX = clamp(ball.x + ball.vx * 0.18, court.left - ACTIVE_SIDE_MARGIN, court.right + ACTIVE_SIDE_MARGIN);
+      targetY = clamp(ball.y > 0 ? ball.y + 40 : positions.receiverY, court.shortLine + 24, court.front + ACTIVE_BACK_MARGIN);
     }
   }
 
@@ -1035,9 +1039,9 @@ function updateCpu(dt) {
   cpu.x += clamp(dx, -cpu.speed * dt, cpu.speed * dt);
   cpu.y += clamp(dy, -cpu.depthSpeed * dt, cpu.depthSpeed * dt);
 
-  // CPU can step a bit past the side walls to chase off-court balls.
-  cpu.x = clamp(cpu.x, court.left - 30, court.right + 30);
-  cpu.y = clamp(cpu.y, court.shortLine + 12, court.front - 24);
+  // CPU can step off court during live rallies to chase airborne balls.
+  cpu.x = clamp(cpu.x, court.left - ACTIVE_SIDE_MARGIN, court.right + ACTIVE_SIDE_MARGIN);
+  cpu.y = clamp(cpu.y, court.shortLine + 12, court.front + ACTIVE_BACK_MARGIN);
 
   if (!ball.live && serving === "cpu") {
     ball.x = cpu.x;
@@ -1073,9 +1077,9 @@ function updateRemoteOpponent(dt) {
   const isWaitingToServe = !ball.live && serving === "cpu";
   const isWaitingToReceive = !ball.live && serving === "player";
   const minY = isWaitingToReceive ? court.serviceLine + 20 : court.shortLine + 24;
-  const maxY = isWaitingToServe ? court.serviceLine - 26 : court.front - 30;
-  const minX = isWaitingToServe || isWaitingToReceive ? court.left + 36 : court.left - 30;
-  const maxX = isWaitingToServe || isWaitingToReceive ? court.right - 36 : court.right + 30;
+  const maxY = isWaitingToServe ? court.serviceLine - 26 : ball.live ? court.front + ACTIVE_BACK_MARGIN : court.front - 30;
+  const minX = isWaitingToServe || isWaitingToReceive ? court.left + 36 : court.left - ACTIVE_SIDE_MARGIN;
+  const maxX = isWaitingToServe || isWaitingToReceive ? court.right - 36 : court.right + ACTIVE_SIDE_MARGIN;
 
   cpu.x = clamp(cpu.x + online.remoteInput.moveX * cpu.speed * dt, minX, maxX);
   cpu.y = clamp(cpu.y + online.remoteInput.moveY * cpu.depthSpeed * dt, minY, maxY);
@@ -1311,6 +1315,7 @@ function tick(now) {
     updateKillCharge(dt);
     updateAimFromStick(dt);
     sendLocalInput(dt);
+    smoothRemoteState(dt);
     updateScene(dt);
     updateChargeUI();
     requestAnimationFrame(tick);
@@ -1495,48 +1500,98 @@ function handleOnlineMessage(data) {
 
 function actorState(actor) {
   return {
-    x: actor.x,
-    y: actor.y,
-    cooldown: actor.cooldown,
-    swingTimer: actor.swingTimer,
+    x: Math.round(actor.x * 10) / 10,
+    y: Math.round(actor.y * 10) / 10,
+    cooldown: Math.round(actor.cooldown * 1000) / 1000,
+    swingTimer: Math.round(actor.swingTimer * 1000) / 1000,
     swingStyle: actor.swingStyle,
   };
 }
 
-function applyActorState(actor, state) {
+function ballState() {
+  return {
+    x: Math.round(ball.x * 10) / 10,
+    y: Math.round(ball.y * 10) / 10,
+    height: Math.round(ball.height * 1000) / 1000,
+    vx: Math.round(ball.vx * 10) / 10,
+    vy: Math.round(ball.vy * 10) / 10,
+    vh: Math.round(ball.vh * 1000) / 1000,
+    spin: Math.round(ball.spin * 1000) / 1000,
+    wallBounce: ball.wallBounce,
+    floorBounce: ball.floorBounce,
+    wallHeight: ball.wallHeight,
+    wallFlash: ball.wallFlash,
+    live: ball.live,
+    lastHit: ball.lastHit,
+    floorBounces: ball.floorBounces,
+    returnWindowGrace: ball.returnWindowGrace,
+    wallTravelGrace: ball.wallTravelGrace,
+    servePending: ball.servePending,
+    serveFaultType: ball.serveFaultType,
+    bouncedSinceWall: ball.bouncedSinceWall,
+  };
+}
+
+function applyActorState(actor, state, smoothing = 1) {
   if (!state) return;
-  actor.x = state.x;
-  actor.y = state.y;
+  actor.x += (state.x - actor.x) * smoothing;
+  actor.y += (state.y - actor.y) * smoothing;
   actor.cooldown = state.cooldown;
   actor.swingTimer = state.swingTimer;
   actor.swingStyle = state.swingStyle;
 }
 
+function applyBallState(state, smoothing = 1) {
+  if (!state) return;
+  ball.x += (state.x - ball.x) * smoothing;
+  ball.y += (state.y - ball.y) * smoothing;
+  ball.height += (state.height - ball.height) * smoothing;
+  ball.vx = state.vx;
+  ball.vy = state.vy;
+  ball.vh = state.vh;
+  ball.spin = state.spin;
+  ball.wallBounce = state.wallBounce;
+  ball.floorBounce = state.floorBounce;
+  ball.wallHeight = state.wallHeight;
+  ball.wallFlash = state.wallFlash;
+  ball.live = state.live;
+  ball.lastHit = state.lastHit;
+  ball.floorBounces = state.floorBounces;
+  ball.returnWindowGrace = state.returnWindowGrace;
+  ball.wallTravelGrace = state.wallTravelGrace;
+  ball.servePending = state.servePending;
+  ball.serveFaultType = state.serveFaultType;
+  ball.bouncedSinceWall = state.bouncedSinceWall;
+}
+
 function sendSnapshot(force = false) {
   const now = performance.now();
-  if (!force && now - online.lastSend < 33) return;
+  if (!force && now - online.lastSend < 50) return;
   online.lastSend = now;
   sendOnline({
     type: "snapshot",
     state: {
       player: actorState(player),
       cpu: actorState(cpu),
-      ball: { ...ball },
+      ball: ballState(),
       playerScore,
       cpuScore,
       serving,
       faultCount,
       gameOver,
       status: statusText.textContent,
+      force,
     },
   });
 }
 
 function applySnapshot(state) {
   if (!state) return;
-  applyActorState(player, state.player);
-  applyActorState(cpu, state.cpu);
-  Object.assign(ball, state.ball);
+  online.remoteState = state;
+  const snap = state.force ? 1 : 0.45;
+  applyActorState(player, state.player, snap);
+  applyActorState(cpu, state.cpu, snap);
+  applyBallState(state.ball, snap);
   playerScore = state.playerScore;
   cpuScore = state.cpuScore;
   serving = state.serving;
@@ -1546,10 +1601,19 @@ function applySnapshot(state) {
   if (state.status) setStatus(state.status);
 }
 
+function smoothRemoteState(dt) {
+  const state = online.remoteState;
+  if (!state) return;
+  const smoothing = 1 - Math.pow(0.0015, dt);
+  applyActorState(player, state.player, smoothing);
+  applyActorState(cpu, state.cpu, smoothing);
+  applyBallState(state.ball, smoothing);
+}
+
 function sendLocalInput(dt) {
-  online.lastSend += dt * 1000;
-  if (online.lastSend < 33) return;
-  online.lastSend = 0;
+  online.lastInputSend += dt * 1000;
+  if (online.lastInputSend < 24) return;
+  online.lastInputSend = 0;
   const left = keys.has("a");
   const right = keys.has("d");
   const forward = keys.has("w");
