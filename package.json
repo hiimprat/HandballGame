@@ -1,0 +1,12 @@
+{
+  "name": "ny-handball-rally",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser-based New York handball game with a small WebSocket multiplayer relay.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

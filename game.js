@@ -12,6 +12,7 @@ const aimStickEl = document.querySelector("#aimStick");
 const chargeMeterEl = document.querySelector("#chargeMeter");
 const chargeFillEl = document.querySelector("#chargeFill");
 const roomInput = document.querySelector("#roomInput");
+const serverInput = document.querySelector("#serverInput");
 const hostBtn = document.querySelector("#hostBtn");
 const joinBtn = document.querySelector("#joinBtn");
 const networkStatusEl = document.querySelector("#networkStatus");
@@ -1363,10 +1364,25 @@ function sendOnline(payload) {
   online.socket.send(JSON.stringify(payload));
 }
 
+function multiplayerServerUrl() {
+  const saved = localStorage.getItem("handballServerUrl") || "";
+  const raw = (serverInput?.value || saved).trim();
+  if (serverInput && !serverInput.value && saved) serverInput.value = saved;
+  if (!raw) {
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${location.host}`;
+  }
+
+  localStorage.setItem("handballServerUrl", raw);
+  if (raw.startsWith("wss://") || raw.startsWith("ws://")) return raw;
+  if (raw.startsWith("https://")) return `wss://${raw.slice("https://".length)}`;
+  if (raw.startsWith("http://")) return `ws://${raw.slice("http://".length)}`;
+  return `wss://${raw}`;
+}
+
 function connectOnline(role) {
   const room = (roomInput?.value || "handball").trim() || "handball";
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${protocol}//${location.host}`);
+  const socket = new WebSocket(multiplayerServerUrl());
   online.socket = socket;
   online.role = role;
   online.room = room;
@@ -1711,6 +1727,10 @@ if (hostBtn) {
 
 if (joinBtn) {
   joinBtn.addEventListener("click", () => connectOnline("guest"));
+}
+
+if (serverInput) {
+  serverInput.value = localStorage.getItem("handballServerUrl") || "";
 }
 
 resizeRenderer();
