@@ -3,8 +3,18 @@ import * as THREE from "three";
 const canvas = document.querySelector("#gameCanvas");
 const playerScoreEl = document.querySelector("#playerScore");
 const cpuScoreEl = document.querySelector("#cpuScore");
+const opponentLabelEl = document.querySelector("#opponentLabel");
 const statusText = document.querySelector("#statusText");
 const shotButtons = [...document.querySelectorAll("[data-shot]")];
+const restartBtn = document.querySelector("#restartBtn");
+const moveStickEl = document.querySelector("#moveStick");
+const aimStickEl = document.querySelector("#aimStick");
+const chargeMeterEl = document.querySelector("#chargeMeter");
+const chargeFillEl = document.querySelector("#chargeFill");
+const roomInput = document.querySelector("#roomInput");
+const hostBtn = document.querySelector("#hostBtn");
+const joinBtn = document.querySelector("#joinBtn");
+const networkStatusEl = document.querySelector("#networkStatus");
 
 const court = {
   left: 90,
@@ -28,6 +38,7 @@ const GRAVITY_Y = 24; // world units per second^2
 const FLOOR_HEIGHT = 0.23; // ball radius in world units (also rest height)
 const SWING_HEIGHT = 1.2; // approximate hand height when contacting the ball
 const COURT_TO_WORLD_DEPTH = world.depth / 514; // (court.front - court.wallY) = 514
+const FLOOR_BOUNCE_BOOST = 1.22;
 
 const keys = new Set();
 const targetScore = 11;
@@ -129,6 +140,82 @@ let aim = 0; // legacy normalized aim (kept for spin/CPU compat); derived from a
 let aimX = 480; // target X on the wall in court coords; player can aim anywhere
 let aimHeight = shotProfiles.normal.wallHeight;
 let selectedShot = "normal";
+
+const online = {
+  socket: null,
+  role: "offline",
+  room: "",
+  peerConnected: false,
+  lastSend: 0,
+  remoteInput: {
+    moveX: 0,
+    moveY: 0,
+    aimX: 480,
+    aimHeight: shotProfiles.normal.wallHeight,
+    shots: [],
+  },
+};
+
+// Kill is a charge-up shot. Press-and-hold any kill input (right mouse, K key,
+// Kill button) to charge; release to fire. Charge fills linearly over 1.0s.
+// While charging, the player walks at ~42% speed — committing to a kill is a
+// real trade-off vs. just regular shots.
+const KILL_CHARGE_TIME = 1.0;
+const KILL_CHARGE_MOVE_MULT = 0.42;
+const killCharge = {
+  charging: false,
+  amount: 0,
+  // Track which input started the charge so a different input releasing it
+  // doesn't accidentally end the wrong charge session.
+  source: null,
+};
+
+function startKillCharge(source) {
+  if (killCharge.charging || gameOver) return;
+  killCharge.charging = true;
+  killCharge.amount = 0;
+  killCharge.source = source;
+}
+
+function releaseKillCharge(source) {
+  if (!killCharge.charging || killCharge.source !== source) return;
+  // Snapshot the charge for hitBall/serveFromPlayer to read, then fire.
+  swingPlayer("kill");
+  resetKillCharge();
+}
+
+function cancelKillCharge() {
+  resetKillCharge();
+}
+
+function resetKillCharge() {
+  killCharge.charging = false;
+  killCharge.source = null;
+  killCharge.amount = 0;
+  shotButtons.forEach((button) => button.classList.remove("charging"));
+  updateChargeUI();
+}
+
+function killChargeMultipliers() {
+  // 0% charge → kill is *weaker* than Regular (so a panic-tap is bad).
+  // 100% charge → kill is the strongest shot in the game.
+  const c = clamp(killCharge.amount, 0, 1);
+  return {
+    speed: 0.55 + c * 0.7, // 0.55 → 1.25 of base
+    side: 0.7 + c * 0.5,
+    spin: 0.5 + c * 1.0,
+  };
+}
+
+function applyKillCharge(profile) {
+  const m = killChargeMultipliers();
+  return {
+    ...profile,
+    speed: profile.speed * m.speed,
+    side: profile.side * m.side,
+    spin: profile.spin * m.spin,
+  };
+}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x10170f);
@@ -311,8 +398,8 @@ function shotSettings(profile, targetHeight) {
   // Carry maps wall-hit height to retained depth velocity. A low hit barely
   // carries (ball dies near the wall); a high hit holds most of its speed
   // and flies deep into the court.
-  const carry = 0.55 + height * 0.55;
-  const floorLife = 0.7 + height * 0.3;
+  const carry = profile.label === "Lob" ? 0.48 + height * 0.42 : 0.55 + height * 0.55;
+  const floorLife = profile.label === "Lob" ? 0.78 + height * 0.42 : 0.7 + height * 0.3;
   return {
     ...profile,
     wallHeight: height,
@@ -335,6 +422,30 @@ function initialVhForWallTarget(distYCourt, vyCourtSpeed, startHeight, targetWal
 function setStatus(text, duration = 0) {
   statusText.textContent = text;
   messageTimer = duration;
+}
+
+function opponentName() {
+  return online.role === "offline" ? "CPU" : "Player 2";
+}
+
+function playerName(name) {
+  return name === "player" ? "Player" : opponentName();
+}
+
+function updateOnlineUI() {
+  if (opponentLabelEl) opponentLabelEl.textContent = opponentName();
+  if (!networkStatusEl) return;
+  if (online.role === "offline") {
+    networkStatusEl.textContent = "Offline";
+  } else if (online.role === "host") {
+    networkStatusEl.textContent = online.peerConnected
+      ? `Hosting ${online.room}: connected`
+      : `Hosting ${online.room}: waiting`;
+  } else {
+    networkStatusEl.textContent = online.peerConnected
+      ? `Joined ${online.room}`
+      : `Joining ${online.room}`;
+  }
 }
 
 function resetPoint(nextServer = serving) {
@@ -371,13 +482,17 @@ function resetPoint(nextServer = serving) {
     setStatus("Aim, then left/right click to serve");
   } else {
     ball.x = cpu.x;
-    ball.y = cpu.y + 52;
-    setStatus("CPU serving");
-    window.setTimeout(() => {
-      if (!gameOver && !ball.live && serving === "cpu") {
-        cpuServe();
-      }
-    }, 700);
+    ball.y = cpu.y - 48;
+    if (online.role === "host" && online.peerConnected) {
+      setStatus("Player 2 serving");
+    } else {
+      setStatus("CPU serving");
+      window.setTimeout(() => {
+        if (!gameOver && !ball.live && serving === "cpu" && online.role !== "host") {
+          cpuServe();
+        }
+      }, 700);
+    }
   }
 }
 
@@ -414,7 +529,7 @@ function finishRally(winner, reason) {
 
   if (playerScore >= targetScore || cpuScore >= targetScore) {
     gameOver = true;
-    setStatus(`${winner === "player" ? "Player" : "CPU"} wins ${playerScore}-${cpuScore}. Press R`);
+    setStatus(`${playerName(winner)} wins ${playerScore}-${cpuScore}. Press R`);
     return;
   }
 
@@ -432,7 +547,7 @@ function serviceFault(type) {
     const oldServer = serving;
     serving = serving === "player" ? "cpu" : "player";
     faultCount = 0;
-    setStatus(`${type}. ${oldServer === "player" ? "Player" : "CPU"} side out`, 900);
+    setStatus(`${type}. ${playerName(oldServer)} side out`, 900);
     window.setTimeout(() => {
       if (!gameOver) resetPoint(serving);
     }, 850);
@@ -472,32 +587,44 @@ function resetServe() {
     setStatus("Second serve: aim, then left/right click");
   } else {
     ball.x = cpu.x;
-    ball.y = cpu.y + 52;
-    setStatus("CPU second serve");
-    window.setTimeout(() => {
-      if (!gameOver && !ball.live && serving === "cpu") {
-        cpuServe();
-      }
-    }, 700);
+    ball.y = cpu.y - 48;
+    if (online.role === "host" && online.peerConnected) {
+      setStatus("Player 2 second serve");
+    } else {
+      setStatus("CPU second serve");
+      window.setTimeout(() => {
+        if (!gameOver && !ball.live && serving === "cpu" && online.role !== "host") {
+          cpuServe();
+        }
+      }, 700);
+    }
   }
 }
 
-function serveFromPlayer() {
-  const profile = shotSettings(shotProfiles[selectedShot], selectedShot === "normal" ? Math.max(aimHeight, 0.34) : aimHeight);
+function serveFromActor(actor, name, shotType = selectedShot, targetAimX = aimX, targetAimHeight = aimHeight) {
+  // Per-shot minimum heights so each shot type *feels* right even if the
+  // reticle is left low. Normal needs to clear the short-line; lob is by
+  // definition a high arc; kill is unconstrained (you want to drive it low).
+  let serveHeight = targetAimHeight;
+  if (shotType === "normal") serveHeight = Math.max(targetAimHeight, 0.34);
+  else if (shotType === "lob") serveHeight = Math.max(targetAimHeight, 0.62);
+  let baseProfile = shotProfiles[shotType];
+  if (shotType === "kill" && name === "player") baseProfile = applyKillCharge(baseProfile);
+  const profile = shotSettings(baseProfile, serveHeight);
   ball.live = true;
-  ball.x = player.x;
-  ball.y = player.y - 46;
+  ball.x = actor.x;
+  ball.y = actor.y - 46;
   ball.height = SWING_HEIGHT;
   // Compute vx so the ball actually arrives at aimX on the wall.
   const tToWall = Math.max(0.12, (ball.y - court.wallY) / profile.speed);
   ball.vy = -profile.speed;
-  ball.vx = clamp((aimX - ball.x) / tToWall, -2200, 2200);
+  ball.vx = clamp((targetAimX - ball.x) / tToWall, -2200, 2200);
   ball.vh = initialVhForWallTarget(ball.y - court.wallY, profile.speed, ball.height, wallTargetHeight(profile));
-  ball.spin = clamp((aimX - ball.x) / 400, -2, 2) * profile.spin;
+  ball.spin = clamp((targetAimX - ball.x) / 400, -2, 2) * profile.spin;
   ball.wallBounce = profile.wallBounce;
   ball.floorBounce = profile.floorBounce;
   ball.wallHeight = profile.wallHeight;
-  ball.lastHit = "player";
+  ball.lastHit = name;
   ball.floorBounces = 0;
   ball.returnWindowGrace = 0;
   ball.wallTravelGrace = 0;
@@ -505,8 +632,12 @@ function serveFromPlayer() {
   ball.serveFaultType = profile.wallHeight <= 0.3 ? "Short serve" : null;
   ball.bouncedSinceWall = false;
   trailPoints.length = 0;
-  startSwing(player, selectedShot);
+  startSwing(actor, shotType);
   setStatus("Rally");
+}
+
+function serveFromPlayer() {
+  serveFromActor(player, "player", selectedShot, aimX, aimHeight);
 }
 
 function cpuServe() {
@@ -549,6 +680,11 @@ function startSwing(actor, style) {
 
 function swingPlayer(type = selectedShot) {
   if (gameOver) return;
+  if (online.role === "guest") {
+    sendOnline({ type: "shot", shot: type });
+    setSelectedShot(type);
+    return;
+  }
   setSelectedShot(type);
   if (!ball.live && serving === "player") {
     serveFromPlayer();
@@ -557,7 +693,7 @@ function swingPlayer(type = selectedShot) {
   hitBall(player, "player", selectedShot);
 }
 
-function hitBall(actor, name, shotType = "normal") {
+function hitBall(actor, name, shotType = "normal", targetAimX = aimX, targetAimHeight = aimHeight) {
   if (actor.cooldown > 0 || !ball.live || ball.lastHit === name || !ball.bouncedSinceWall) {
     return false;
   }
@@ -569,18 +705,25 @@ function hitBall(actor, name, shotType = "normal") {
   // Must be in a hittable height range for either player.
   if (ball.height < FLOOR_HEIGHT - 0.05 || ball.height > 2.6) return false;
 
-  const baseProfile = shotProfiles[shotType] || shotProfiles.normal;
+  let baseProfile = shotProfiles[shotType] || shotProfiles.normal;
+  // Apply the kill-shot charge multiplier on the player's kill before the
+  // height-based shotSettings adjustments cascade.
+  if (shotType === "kill" && name === "player") baseProfile = applyKillCharge(baseProfile);
   // Player aims with mouse height; CPU picks a target height via plannedShot logic.
-  const targetHeight = name === "player" ? aimHeight : clamp(cpu.targetWallHeight ?? baseProfile.wallHeight, 0.05, 1);
+  // For lob, force the wall target high enough to actually arc — otherwise a
+  // low aim turns the lob into a slow flat shot, which defeats the button.
+  const isHumanShot = name === "player" || (online.role === "host" && online.peerConnected && name === "cpu");
+  const humanAimHeight = shotType === "lob" ? Math.max(targetAimHeight, 0.6) : targetAimHeight;
+  const targetHeight = isHumanShot ? humanAimHeight : clamp(cpu.targetWallHeight ?? baseProfile.wallHeight, 0.05, 1);
   const profile = shotSettings(baseProfile, targetHeight);
   const depthSpeed = profile.speed;
   ball.vy = -depthSpeed;
 
-  if (name === "player") {
+  if (isHumanShot) {
     // Player can aim anywhere on the wall. Compute vx so the ball lands at aimX.
     const tToWall = Math.max(0.12, (ball.y - court.wallY) / depthSpeed);
-    ball.vx = clamp((aimX - ball.x) / tToWall, -2200, 2200);
-    ball.spin = clamp((aimX - ball.x) / 400, -2, 2) * profile.spin;
+    ball.vx = clamp((targetAimX - ball.x) / tToWall, -2200, 2200);
+    ball.spin = clamp((targetAimX - ball.x) / 400, -2, 2) * profile.spin;
   } else {
     const opponentX = player.x;
     const angle = clamp((ball.x - actor.x) / actor.reach, -1, 1);
@@ -603,11 +746,114 @@ function hitBall(actor, name, shotType = "normal") {
   ball.servePending = false;
   ball.serveFaultType = null;
   ball.bouncedSinceWall = false;
-  actor.cooldown = shotType === "kill" ? 0.34 : 0.22;
+  actor.cooldown = shotType === "kill" ? 0.34 : shotType === "lob" ? 0.26 : 0.22;
   trailPoints.length = 0;
   startSwing(actor, shotType);
-  setStatus(name === "player" ? `${profile.label} shot` : `CPU ${profile.label.toLowerCase()}`, 360);
+  setStatus(name === "player" ? `${profile.label} shot` : `${opponentName()} ${profile.label.toLowerCase()}`, 360);
   return true;
+}
+
+// Floating analog stick: pointerdown anywhere in the joystick element starts a
+// drag, pointermove updates the knob, release recenters. Output state.x/state.y
+// are normalized into [-1, 1] (clipped at the rim). Multiple sticks coexist
+// because each captures its own pointerId.
+function createJoystick(rootEl) {
+  if (!rootEl) {
+    return { x: 0, y: 0, active: false };
+  }
+  const base = rootEl.querySelector(".joystick__base");
+  const knob = rootEl.querySelector(".joystick__knob");
+  const state = { x: 0, y: 0, active: false, pointerId: null };
+
+  function setKnob(dx, dy) {
+    const rect = base.getBoundingClientRect();
+    const r = Math.max(20, rect.width / 2);
+    const dist = Math.hypot(dx, dy);
+    let nx = dx;
+    let ny = dy;
+    if (dist > r) {
+      nx = (dx / dist) * r;
+      ny = (dy / dist) * r;
+    }
+    knob.style.transform = `translate(calc(-50% + ${nx}px), calc(-50% + ${ny}px))`;
+    state.x = nx / r;
+    state.y = ny / r;
+  }
+
+  function reset() {
+    knob.style.transform = "translate(-50%, -50%)";
+    state.x = 0;
+    state.y = 0;
+    state.active = false;
+    state.pointerId = null;
+    rootEl.classList.remove("active");
+  }
+
+  rootEl.addEventListener("pointerdown", (event) => {
+    if (state.active) return;
+    event.preventDefault();
+    state.active = true;
+    state.pointerId = event.pointerId;
+    rootEl.classList.add("active");
+    try {
+      rootEl.setPointerCapture(event.pointerId);
+    } catch (_) {
+      // ignore — some browsers refuse capture on certain elements
+    }
+    const rect = base.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    setKnob(event.clientX - cx, event.clientY - cy);
+  });
+
+  rootEl.addEventListener("pointermove", (event) => {
+    if (!state.active || event.pointerId !== state.pointerId) return;
+    event.preventDefault();
+    const rect = base.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    setKnob(event.clientX - cx, event.clientY - cy);
+  });
+
+  const release = (event) => {
+    if (event.pointerId !== state.pointerId) return;
+    event.preventDefault();
+    reset();
+  };
+  rootEl.addEventListener("pointerup", release);
+  rootEl.addEventListener("pointercancel", release);
+  rootEl.addEventListener("lostpointercapture", release);
+
+  return state;
+}
+
+const moveStick = createJoystick(moveStickEl);
+const aimStick = createJoystick(aimStickEl);
+
+// Joystick deadzone — under this threshold the stick is treated as centered so
+// the player doesn't drift from a fingertip resting near center.
+const STICK_DEADZONE = 0.14;
+
+function applyDeadzone(value) {
+  if (Math.abs(value) < STICK_DEADZONE) return 0;
+  // Rescale so the usable range stays smooth past the deadzone.
+  const sign = Math.sign(value);
+  return sign * ((Math.abs(value) - STICK_DEADZONE) / (1 - STICK_DEADZONE));
+}
+
+function updateAimFromStick(dt) {
+  const sx = applyDeadzone(aimStick.x);
+  const sy = applyDeadzone(aimStick.y);
+  if (sx === 0 && sy === 0) return;
+  // Full deflection X traverses the court width in ~0.85s; full deflection Y
+  // traverses the wall-height range in ~0.7s. Tuned to feel responsive without
+  // overshooting on small phone screens.
+  const courtWidth = court.right - court.left;
+  aimX = clamp(aimX + sx * courtWidth * 1.18 * dt, court.left + 6, court.right - 6);
+  // Pushing the stick UP (negative dy in screen coords) should raise the aim.
+  aimHeight = clamp(aimHeight + -sy * 1.45 * dt, 0.05, 1);
+  aim = (aimX - player.x) / 280;
+  window.aim = aim;
 }
 
 function updatePlayer(dt) {
@@ -615,8 +861,10 @@ function updatePlayer(dt) {
   const right = keys.has("d");
   const forward = keys.has("w");
   const back = keys.has("s");
-  const xDirection = Number(right) - Number(left);
-  const yDirection = Number(back) - Number(forward);
+  const stickX = applyDeadzone(moveStick.x);
+  const stickY = applyDeadzone(moveStick.y);
+  const xDirection = clamp((Number(right) - Number(left)) + stickX, -1, 1);
+  const yDirection = clamp((Number(back) - Number(forward)) + stickY, -1, 1);
   const isWaitingToServe = !ball.live && serving === "player";
   const isWaitingToReceive = !ball.live && serving === "cpu";
   const minY = isWaitingToReceive ? court.serviceLine + 20 : court.shortLine + 24;
@@ -624,8 +872,10 @@ function updatePlayer(dt) {
   // Allow stepping ~30 court units past either side wall to chase off-court balls.
   const minX = isWaitingToServe || isWaitingToReceive ? court.left + 36 : court.left - 30;
   const maxX = isWaitingToServe || isWaitingToReceive ? court.right - 36 : court.right + 30;
-  player.x = clamp(player.x + xDirection * player.speed * dt, minX, maxX);
-  player.y = clamp(player.y + yDirection * player.depthSpeed * dt, minY, maxY);
+  // Charging the kill bleeds movement so the shot is a real commitment.
+  const moveMul = killCharge.charging ? KILL_CHARGE_MOVE_MULT : 1;
+  player.x = clamp(player.x + xDirection * player.speed * moveMul * dt, minX, maxX);
+  player.y = clamp(player.y + yDirection * player.depthSpeed * moveMul * dt, minY, maxY);
   player.cooldown = Math.max(0, player.cooldown - dt);
   player.swingTimer = Math.max(0, player.swingTimer - dt);
 
@@ -680,7 +930,7 @@ function predictCpuIntercept() {
         }
       }
       ph = FLOOR_HEIGHT;
-      pvh = -pvh * ball.floorBounce;
+      pvh = -pvh * ball.floorBounce * FLOOR_BOUNCE_BOOST;
       pvy *= 0.88;
       pvx *= 0.9;
       floorBouncesPred += 1;
@@ -731,6 +981,11 @@ function decideCpuShot() {
 }
 
 function updateCpu(dt) {
+  if (online.role === "host" && online.peerConnected) {
+    updateRemoteOpponent(dt);
+    return;
+  }
+
   cpu.cooldown = Math.max(0, cpu.cooldown - dt);
   cpu.swingTimer = Math.max(0, cpu.swingTimer - dt);
   cpu.decisionTimer = Math.max(0, cpu.decisionTimer - dt);
@@ -802,6 +1057,36 @@ function updateCpu(dt) {
     const distance = Math.hypot(dxBall, dyBall);
     if (distance <= cpu.reach + 18 && ball.height >= 0.3 && ball.height <= 2.3) {
       hitBall(cpu, "cpu", cpu.plannedShot);
+    }
+  }
+}
+
+function updateRemoteOpponent(dt) {
+  cpu.cooldown = Math.max(0, cpu.cooldown - dt);
+  cpu.swingTimer = Math.max(0, cpu.swingTimer - dt);
+  cpu.letItGo = false;
+
+  const isWaitingToServe = !ball.live && serving === "cpu";
+  const isWaitingToReceive = !ball.live && serving === "player";
+  const minY = isWaitingToReceive ? court.serviceLine + 20 : court.shortLine + 24;
+  const maxY = isWaitingToServe ? court.serviceLine - 26 : court.front - 30;
+  const minX = isWaitingToServe || isWaitingToReceive ? court.left + 36 : court.left - 30;
+  const maxX = isWaitingToServe || isWaitingToReceive ? court.right - 36 : court.right + 30;
+
+  cpu.x = clamp(cpu.x + online.remoteInput.moveX * cpu.speed * dt, minX, maxX);
+  cpu.y = clamp(cpu.y + online.remoteInput.moveY * cpu.depthSpeed * dt, minY, maxY);
+
+  if (!ball.live && serving === "cpu") {
+    ball.x = cpu.x;
+    ball.y = cpu.y - 48;
+  }
+
+  while (online.remoteInput.shots.length > 0) {
+    const shot = online.remoteInput.shots.shift();
+    if (!ball.live && serving === "cpu") {
+      serveFromActor(cpu, "cpu", shot, online.remoteInput.aimX, online.remoteInput.aimHeight);
+    } else {
+      hitBall(cpu, "cpu", shot, online.remoteInput.aimX, online.remoteInput.aimHeight);
     }
   }
 }
@@ -879,7 +1164,7 @@ function updateBall(dt) {
 
     // Real bounce: reverse vertical velocity with restitution.
     ball.height = FLOOR_HEIGHT;
-    ball.vh = -ball.vh * ball.floorBounce;
+    ball.vh = -ball.vh * ball.floorBounce * FLOOR_BOUNCE_BOOST;
     ball.vy *= 0.88; // a touch of forward energy bleed each bounce
     ball.vx *= 0.9;
     ball.spin *= 0.7;
@@ -929,10 +1214,11 @@ function updateScene(dt) {
   updateAimGuide();
   updateWallFlash();
 
-  const shoulderOffset = clamp((player.x - 490) / 230, -1.4, 1.4);
-  const cameraZ = Math.max(mapY(player.y) + 8.4, world.frontZ + 4.5);
-  camera.position.lerp(new THREE.Vector3(mapX(player.x) - 1.8 + shoulderOffset, 5.9, cameraZ), 0.08);
-  camera.lookAt(mapX(player.x) * 0.12, 2.8, world.wallZ + 0.6);
+  const cameraActor = online.role === "guest" ? cpu : player;
+  const shoulderOffset = clamp((cameraActor.x - 490) / 230, -1.4, 1.4);
+  const cameraZ = Math.max(mapY(cameraActor.y) + 8.4, world.frontZ + 4.5);
+  camera.position.lerp(new THREE.Vector3(mapX(cameraActor.x) - 1.8 + shoulderOffset, 5.9, cameraZ), 0.08);
+  camera.lookAt(mapX(cameraActor.x) * 0.12, 2.8, world.wallZ + 0.6);
   renderer.render(scene, camera);
 }
 
@@ -978,7 +1264,8 @@ function updateTrail(ballWorld) {
 }
 
 function updateAimGuide() {
-  const start = new THREE.Vector3(mapX(player.x), 1.45, mapY(player.y) - 1.2);
+  const guideActor = online.role === "guest" ? cpu : player;
+  const start = new THREE.Vector3(mapX(guideActor.x), 1.45, mapY(guideActor.y) - 1.2);
   const targetX = clamp(aimX, court.left + 6, court.right - 6);
   const end = new THREE.Vector3(mapX(targetX), wallTargetHeight({ wallHeight: aimHeight }), world.wallZ + 0.05);
   const mid = new THREE.Vector3((start.x + end.x) / 2, 2.4 + aimHeight * 2.2, -2.5);
@@ -1016,32 +1303,245 @@ function tick(now) {
   const dt = Math.min(0.033, (now - lastTime) / 1000);
   lastTime = now;
 
+  if (online.role === "guest") {
+    updateKillCharge(dt);
+    updateAimFromStick(dt);
+    sendLocalInput(dt);
+    updateScene(dt);
+    updateChargeUI();
+    requestAnimationFrame(tick);
+    return;
+  }
+
   if (messageTimer > 0) {
     messageTimer -= dt * 1000;
     if (messageTimer <= 0 && ball.live) setStatus("Rally");
   }
 
+  updateKillCharge(dt);
+  updateAimFromStick(dt);
   updatePlayer(dt);
   updateCpu(dt);
   updateBall(dt);
   updateScene(dt);
+  updateChargeUI();
+  if (online.role === "host") sendSnapshot();
   requestAnimationFrame(tick);
+}
+
+function updateKillCharge(dt) {
+  if (killCharge.charging) {
+    killCharge.amount = clamp(killCharge.amount + dt / KILL_CHARGE_TIME, 0, 1);
+  } else if (killCharge.amount > 0) {
+    // Decay quickly when not charging so a stale value never leaks into a
+    // later kill press.
+    killCharge.amount = Math.max(0, killCharge.amount - dt * 6);
+  }
+}
+
+function updateChargeUI() {
+  if (!chargeMeterEl || !chargeFillEl) return;
+  const visible = killCharge.charging || killCharge.amount > 0.02;
+  chargeMeterEl.classList.toggle("visible", visible);
+  chargeMeterEl.classList.toggle("full", killCharge.amount >= 0.999);
+  // Slight ease so the fill is not visibly twitchy at low charge.
+  chargeFillEl.style.width = `${(killCharge.amount * 100).toFixed(1)}%`;
+  // Tint the in-game aim guide so the player sees the threat level on the wall
+  // target without looking down at the meter.
+  const r = 0xf2 + (0xe8 - 0xf2) * killCharge.amount;
+  const g = 0xca + (0x4f - 0xca) * killCharge.amount;
+  const b = 0x72 + (0x45 - 0x72) * killCharge.amount;
+  const tint = (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b);
+  if (materials.aim && materials.aim.color) materials.aim.color.setHex(tint);
+  if (aimTarget && aimTarget.material && aimTarget.material.color) {
+    aimTarget.material.color.setHex(tint);
+  }
+}
+
+function sendOnline(payload) {
+  if (!online.socket || online.socket.readyState !== WebSocket.OPEN) return;
+  online.socket.send(JSON.stringify(payload));
+}
+
+function connectOnline(role) {
+  const room = (roomInput?.value || "handball").trim() || "handball";
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(`${protocol}//${location.host}`);
+  online.socket = socket;
+  online.role = role;
+  online.room = room;
+  online.peerConnected = false;
+  updateOnlineUI();
+
+  socket.addEventListener("open", () => {
+    sendOnline({ type: "join", room, role });
+  });
+
+  socket.addEventListener("message", (event) => {
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    handleOnlineMessage(data);
+  });
+
+  socket.addEventListener("close", () => {
+    online.role = "offline";
+    online.peerConnected = false;
+    online.socket = null;
+    updateOnlineUI();
+    setStatus("Online disconnected", 900);
+  });
+}
+
+function handleOnlineMessage(data) {
+  if (data.type === "joined") {
+    online.role = data.role;
+    online.room = data.room;
+    online.peerConnected = false;
+    updateOnlineUI();
+    if (online.role === "host") {
+      restartGame();
+      setStatus("Waiting for Player 2");
+    } else {
+      setStatus("Connected. Waiting for host state");
+    }
+    return;
+  }
+
+  if (data.type === "peer-joined") {
+    online.peerConnected = true;
+    updateOnlineUI();
+    if (online.role === "host") {
+      resetPoint(serving);
+      setStatus("Player 2 connected", 900);
+      sendSnapshot(true);
+    }
+    return;
+  }
+
+  if (data.type === "peer-left") {
+    online.peerConnected = false;
+    updateOnlineUI();
+    setStatus("Player 2 disconnected", 1200);
+    return;
+  }
+
+  if (online.role === "host" && data.type === "input") {
+    online.remoteInput.moveX = clamp(data.moveX || 0, -1, 1);
+    online.remoteInput.moveY = clamp(data.moveY || 0, -1, 1);
+    online.remoteInput.aimX = clamp(data.aimX || 480, court.left + 6, court.right - 6);
+    online.remoteInput.aimHeight = clamp(data.aimHeight || shotProfiles.normal.wallHeight, 0.05, 1);
+    return;
+  }
+
+  if (online.role === "host" && data.type === "shot") {
+    online.remoteInput.shots.push(shotProfiles[data.shot] ? data.shot : "normal");
+    return;
+  }
+
+  if (online.role === "guest" && data.type === "snapshot") {
+    applySnapshot(data.state);
+  }
+}
+
+function actorState(actor) {
+  return {
+    x: actor.x,
+    y: actor.y,
+    cooldown: actor.cooldown,
+    swingTimer: actor.swingTimer,
+    swingStyle: actor.swingStyle,
+  };
+}
+
+function applyActorState(actor, state) {
+  if (!state) return;
+  actor.x = state.x;
+  actor.y = state.y;
+  actor.cooldown = state.cooldown;
+  actor.swingTimer = state.swingTimer;
+  actor.swingStyle = state.swingStyle;
+}
+
+function sendSnapshot(force = false) {
+  const now = performance.now();
+  if (!force && now - online.lastSend < 33) return;
+  online.lastSend = now;
+  sendOnline({
+    type: "snapshot",
+    state: {
+      player: actorState(player),
+      cpu: actorState(cpu),
+      ball: { ...ball },
+      playerScore,
+      cpuScore,
+      serving,
+      faultCount,
+      gameOver,
+      status: statusText.textContent,
+    },
+  });
+}
+
+function applySnapshot(state) {
+  if (!state) return;
+  applyActorState(player, state.player);
+  applyActorState(cpu, state.cpu);
+  Object.assign(ball, state.ball);
+  playerScore = state.playerScore;
+  cpuScore = state.cpuScore;
+  serving = state.serving;
+  faultCount = state.faultCount;
+  gameOver = state.gameOver;
+  updateScore();
+  if (state.status) setStatus(state.status);
+}
+
+function sendLocalInput(dt) {
+  online.lastSend += dt * 1000;
+  if (online.lastSend < 33) return;
+  online.lastSend = 0;
+  const left = keys.has("a");
+  const right = keys.has("d");
+  const forward = keys.has("w");
+  const back = keys.has("s");
+  const moveX = clamp((Number(right) - Number(left)) + applyDeadzone(moveStick.x), -1, 1);
+  const moveY = clamp((Number(back) - Number(forward)) + applyDeadzone(moveStick.y), -1, 1);
+  sendOnline({ type: "input", moveX, moveY, aimX, aimHeight });
 }
 
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
-  if (["w", "a", "s", "d", " ", "j", "k"].includes(key)) {
+  // event.code is layout-independent (KeyL, KeyJ, …). Falling back to it for
+  // the shot keys means the bindings still work on Dvorak/AZERTY, where the
+  // physical "L" key may produce a different character.
+  const code = event.code;
+  const isLobKey = key === "l" || code === "KeyL";
+  const isKillKey = key === "k" || code === "KeyK";
+  const isNormalKey = key === " " || key === "j" || code === "KeyJ" || code === "Space";
+
+  if (
+    ["w", "a", "s", "d", " ", "j", "k", "l"].includes(key) ||
+    ["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyJ", "KeyK", "KeyL"].includes(code)
+  ) {
     event.preventDefault();
   }
   keys.add(key);
 
-  if (key === " " || key === "j") swingPlayer("normal");
-  if (key === "k") swingPlayer("kill");
-  if (key === "r") restartGame();
+  if (isNormalKey) swingPlayer("normal");
+  if (isKillKey && !event.repeat) startKillCharge("key");
+  if (isLobKey) swingPlayer("lob");
+  if (key === "r" || code === "KeyR") restartGame();
 });
 
 window.addEventListener("keyup", (event) => {
-  keys.delete(event.key.toLowerCase());
+  const key = event.key.toLowerCase();
+  const code = event.code;
+  keys.delete(key);
+  if (key === "k" || code === "KeyK") releaseKillCharge("key");
 });
 
 function updateAimFromPointer(event) {
@@ -1067,20 +1567,85 @@ function updateAimFromPointer(event) {
   window.aim = aim;
 }
 
-canvas.addEventListener("pointermove", updateAimFromPointer);
+canvas.addEventListener("pointermove", (event) => {
+  // On touch, the right-thumb joystick owns aim. Letting raw canvas touches
+  // also drive aim would yank the reticle around as the player drags.
+  if (event.pointerType === "touch") return;
+  updateAimFromPointer(event);
+});
 
 canvas.addEventListener("pointerdown", (event) => {
+  // Touches on the canvas should not fire shots — the on-screen Regular/Kill
+  // buttons are the dedicated fire controls on mobile.
+  if (event.pointerType === "touch") return;
   event.preventDefault();
-  canvas.setPointerCapture(event.pointerId);
   updateAimFromPointer(event);
-  if (event.button === 2) {
-    swingPlayer("kill");
-    return;
-  }
-
   if (event.button === 0) {
+    canvas.setPointerCapture(event.pointerId);
     swingPlayer("normal");
+  } else if (event.button === 1) {
+    swingPlayer("lob");
+  } else if (event.button === 2) {
+    startKillCharge("mouse");
   }
+});
+
+canvas.addEventListener("pointerup", (event) => {
+  if (event.pointerType === "touch") return;
+  if (event.button === 2) {
+    event.preventDefault();
+    releaseKillCharge("mouse");
+  }
+});
+
+canvas.addEventListener("pointercancel", (event) => {
+  if (event.pointerType === "touch") return;
+  if (killCharge.source === "mouse") cancelKillCharge();
+});
+
+// Right and middle buttons go through mousedown/mouseup. Browsers handle
+// non-primary pointer buttons inconsistently, but mouse events for button 1/2
+// are reliable across Chrome, Firefox, and Safari. mousedown is also where we
+// must call preventDefault to stop Windows' middle-button auto-scroll widget.
+canvas.addEventListener("mousedown", (event) => {
+  if (event.button === 1) {
+    event.preventDefault();
+    updateAimFromPointer(event);
+    swingPlayer("lob");
+  } else if (event.button === 2) {
+    // Right click = start charging the kill shot. Don't fire here — fire on
+    // mouseup.
+    event.preventDefault();
+    updateAimFromPointer(event);
+    startKillCharge("mouse");
+  }
+});
+
+canvas.addEventListener("mouseup", (event) => {
+  if (event.button === 2) {
+    event.preventDefault();
+    releaseKillCharge("mouse");
+  }
+});
+
+// If the cursor leaves the canvas while right-click is held, the canvas may
+// not see the mouseup. Catch it on the window so the charge always resolves.
+window.addEventListener("mouseup", (event) => {
+  if (event.button === 2 && killCharge.source === "mouse") {
+    releaseKillCharge("mouse");
+  }
+});
+
+// If the user alt-tabs or the page hides mid-charge, cancel the charge so it
+// doesn't fire on return as a stale full-power shot.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) cancelKillCharge();
+});
+
+// Middle click also tries to open links in new tabs on bubbled `auxclick`.
+// Cancel that so the canvas is a clean shot input.
+canvas.addEventListener("auxclick", (event) => {
+  if (event.button === 1) event.preventDefault();
 });
 
 canvas.addEventListener("contextmenu", (event) => {
@@ -1088,10 +1653,68 @@ canvas.addEventListener("contextmenu", (event) => {
 });
 
 shotButtons.forEach((button) => {
-  button.addEventListener("click", () => swingPlayer(button.dataset.shot));
+  const shot = button.dataset.shot;
+  if (shot === "kill") {
+    // Kill is press-and-hold to charge. Use pointer events so a single handler
+    // works for mouse, touch, and pen.
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      try {
+        button.setPointerCapture(event.pointerId);
+      } catch (_) {
+        // Some browsers refuse capture on disabled/hidden buttons; safe to ignore.
+      }
+      button.classList.add("charging");
+      startKillCharge("button");
+    });
+    const release = (event) => {
+      if (killCharge.source !== "button") return;
+      event.preventDefault();
+      button.classList.remove("charging");
+      releaseKillCharge("button");
+    };
+    button.addEventListener("pointerup", release);
+    button.addEventListener("pointercancel", () => {
+      button.classList.remove("charging");
+      cancelKillCharge();
+    });
+    button.addEventListener("lostpointercapture", () => {
+      button.classList.remove("charging");
+      // If pointer capture is lost we shouldn't auto-fire — the player likely
+      // dragged out of the button intentionally or the OS interrupted us.
+      cancelKillCharge();
+    });
+    // The button's default click would still fire on quick taps; suppress it
+    // because pointerup already handled the charge release.
+    button.addEventListener("click", (event) => event.preventDefault());
+  } else {
+    button.addEventListener("click", () => swingPlayer(shot));
+  }
 });
+
+if (restartBtn) {
+  restartBtn.addEventListener("click", () => {
+    if (online.role === "guest") {
+      setStatus("Only the host can restart online", 900);
+      return;
+    }
+    restartGame();
+    // Move focus off the button so subsequent Space/Enter doesn't re-trigger
+    // it instead of serving the next point.
+    restartBtn.blur();
+  });
+}
+
+if (hostBtn) {
+  hostBtn.addEventListener("click", () => connectOnline("host"));
+}
+
+if (joinBtn) {
+  joinBtn.addEventListener("click", () => connectOnline("guest"));
+}
 
 resizeRenderer();
 setSelectedShot("normal");
+updateOnlineUI();
 restartGame();
 requestAnimationFrame(tick);
