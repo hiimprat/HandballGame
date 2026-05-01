@@ -32,11 +32,11 @@
 
         <div class="joystick joystick--move" id="moveStick" aria-label="Movement joystick" role="presentation">
           <div class="joystick__base"><div class="joystick__knob"></div></div>
-          <span class="joystick__label">Move</span>
+          <span class="joystick__label">Move player</span>
         </div>
         <div class="joystick joystick--aim" id="aimStick" aria-label="Aim joystick" role="presentation">
           <div class="joystick__base"><div class="joystick__knob"></div></div>
-          <span class="joystick__label">Aim</span>
+          <span class="joystick__label">Aim wall</span>
         </div>
 
         <div class="charge-meter" id="chargeMeter" aria-hidden="true">
@@ -49,12 +49,12 @@
         <button id="normalShot" type="button" data-shot="normal">
           Regular
           <kbd class="desktop-control">Left Click</kbd>
-          <kbd class="mobile-control">Tap</kbd>
+          <kbd class="mobile-control">Shoot</kbd>
         </button>
         <button id="lobShot" type="button" data-shot="lob">
           Lob
           <kbd class="desktop-control">Middle Click</kbd>
-          <kbd class="mobile-control">Tap</kbd>
+          <kbd class="mobile-control">High</kbd>
         </button>
         <button id="killShot" type="button" data-shot="kill">
           Kill
@@ -69,7 +69,7 @@
         <div class="hint"><kbd>Left Click</kbd> regular</div>
         <div class="hint"><kbd>Middle Click</kbd> lob</div>
         <div class="hint"><kbd>Right Click</kbd> kill</div>
-        <div class="hint touch-hint">Left stick: move &middot; Right stick: aim &middot; Tap a shot button to fire</div>
+        <div class="hint touch-hint">Left stick moves &middot; Right stick or drag court aims &middot; Hold Kill to charge</div>
         <button id="restartBtn" type="button" class="restart-btn" aria-label="Restart match">Restart <kbd class="desktop-only">R</kbd></button>
       </section>
     </main>

@@ -290,6 +290,9 @@ canvas {
   font-weight: 850;
   cursor: pointer;
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .shotbar button:hover,
@@ -375,12 +378,44 @@ kbd {
 }
 
 @media (pointer: coarse) {
+  body {
+    align-items: start;
+    padding-bottom: 104px;
+  }
+
   canvas {
     cursor: default;
   }
 
   .joystick {
     display: block;
+    width: clamp(118px, 24vw, 150px);
+    height: clamp(118px, 24vw, 150px);
+    bottom: max(14px, env(safe-area-inset-bottom));
+  }
+
+  .joystick--move {
+    left: max(10px, env(safe-area-inset-left));
+  }
+
+  .joystick--aim {
+    right: max(10px, env(safe-area-inset-right));
+  }
+
+  .joystick__base {
+    background: rgba(20, 30, 18, 0.34);
+    border-width: 2px;
+  }
+
+  .joystick__knob {
+    width: 54%;
+    height: 54%;
+  }
+
+  .joystick__label {
+    bottom: -18px;
+    font-size: 9px;
+    letter-spacing: 0.08em;
   }
 
   .controls .hint:not(.touch-hint) {
@@ -395,10 +430,23 @@ kbd {
     display: none;
   }
 
+  .shotbar {
+    position: fixed;
+    left: max(10px, env(safe-area-inset-left));
+    right: max(10px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
+    z-index: 10;
+    margin-top: 0;
+    gap: 8px;
+    touch-action: none;
+  }
+
   .shotbar button {
-    min-height: 60px;
+    min-height: 70px;
     font-size: 16px;
     letter-spacing: 0.02em;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.34);
+    touch-action: none;
   }
 
   .shotbar button .desktop-control {
@@ -418,8 +466,8 @@ kbd {
 
 @media (pointer: coarse) and (max-width: 640px) {
   .joystick {
-    width: 116px;
-    height: 116px;
+    width: 112px;
+    height: 112px;
     bottom: 10px;
   }
 

@@ -233,6 +233,7 @@ const camera = new THREE.PerspectiveCamera(57, canvas.clientWidth / canvas.clien
 camera.position.set(0, 7.6, 23.5);
 const pointerNdc = new THREE.Vector2();
 const raycaster = new THREE.Raycaster();
+let touchAimPointerId = null;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -1680,14 +1681,34 @@ function updateAimFromPointer(event) {
 canvas.addEventListener("pointermove", (event) => {
   // On touch, the right-thumb joystick owns aim. Letting raw canvas touches
   // also drive aim would yank the reticle around as the player drags.
-  if (event.pointerType === "touch") return;
+  if (event.pointerType === "touch") {
+    if (event.pointerId === touchAimPointerId) {
+      event.preventDefault();
+      updateAimFromPointer(event);
+    }
+    return;
+  }
   updateAimFromPointer(event);
 });
 
 canvas.addEventListener("pointerdown", (event) => {
   // Touches on the canvas should not fire shots — the on-screen Regular/Kill
   // buttons are the dedicated fire controls on mobile.
-  if (event.pointerType === "touch") return;
+  if (event.pointerType === "touch") {
+    const rect = canvas.getBoundingClientRect();
+    const isRightSide = event.clientX > rect.left + rect.width * 0.42;
+    if (isRightSide) {
+      event.preventDefault();
+      touchAimPointerId = event.pointerId;
+      updateAimFromPointer(event);
+      try {
+        canvas.setPointerCapture(event.pointerId);
+      } catch (_) {
+        // Some mobile browsers reject capture during multi-touch.
+      }
+    }
+    return;
+  }
   event.preventDefault();
   updateAimFromPointer(event);
   if (event.button === 0) {
@@ -1701,7 +1722,10 @@ canvas.addEventListener("pointerdown", (event) => {
 });
 
 canvas.addEventListener("pointerup", (event) => {
-  if (event.pointerType === "touch") return;
+  if (event.pointerType === "touch") {
+    if (event.pointerId === touchAimPointerId) touchAimPointerId = null;
+    return;
+  }
   if (event.button === 2) {
     event.preventDefault();
     releaseKillCharge("mouse");
@@ -1709,7 +1733,10 @@ canvas.addEventListener("pointerup", (event) => {
 });
 
 canvas.addEventListener("pointercancel", (event) => {
-  if (event.pointerType === "touch") return;
+  if (event.pointerType === "touch") {
+    if (event.pointerId === touchAimPointerId) touchAimPointerId = null;
+    return;
+  }
   if (killCharge.source === "mouse") cancelKillCharge();
 });
 
@@ -1764,6 +1791,7 @@ canvas.addEventListener("contextmenu", (event) => {
 
 shotButtons.forEach((button) => {
   const shot = button.dataset.shot;
+  button.addEventListener("dblclick", (event) => event.preventDefault());
   if (shot === "kill") {
     // Kill is press-and-hold to charge. Use pointer events so a single handler
     // works for mouse, touch, and pen.
@@ -1798,7 +1826,19 @@ shotButtons.forEach((button) => {
     // because pointerup already handled the charge release.
     button.addEventListener("click", (event) => event.preventDefault());
   } else {
-    button.addEventListener("click", () => swingPlayer(shot));
+    button.addEventListener("pointerdown", (event) => {
+      if (event.pointerType !== "touch") return;
+      event.preventDefault();
+      button.dataset.touchFired = "1";
+      window.setTimeout(() => {
+        delete button.dataset.touchFired;
+      }, 350);
+      swingPlayer(shot);
+    });
+    button.addEventListener("click", () => {
+      if (button.dataset.touchFired) return;
+      swingPlayer(shot);
+    });
   }
 });
 
