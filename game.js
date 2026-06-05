@@ -234,6 +234,12 @@ camera.position.set(0, 7.6, 23.5);
 const pointerNdc = new THREE.Vector2();
 const raycaster = new THREE.Raycaster();
 let touchAimPointerId = null;
+const coarsePointerQuery = window.matchMedia?.("(pointer: coarse)");
+const mobileTouchShot = {
+  pointerId: null,
+  shot: "normal",
+  active: false,
+};
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -488,7 +494,7 @@ function resetPoint(nextServer = serving) {
   if (serving === "player") {
     ball.x = player.x;
     ball.y = player.y - 48;
-    setStatus("Aim, then left/right click to serve");
+    setStatus(playerServePrompt());
   } else {
     ball.x = cpu.x;
     ball.y = cpu.y - 48;
@@ -516,6 +522,13 @@ function restartGame() {
 function updateScore() {
   playerScoreEl.textContent = playerScore;
   cpuScoreEl.textContent = cpuScore;
+}
+
+function playerServePrompt(isSecondServe = false) {
+  if (isTouchOptimized()) {
+    return isSecondServe ? "Second serve: aim right side, release" : "Aim right side, release to serve";
+  }
+  return isSecondServe ? "Second serve: aim, then left/right click" : "Aim, then left/right click to serve";
 }
 
 function finishRally(winner, reason) {
@@ -593,7 +606,7 @@ function resetServe() {
   if (serving === "player") {
     ball.x = player.x;
     ball.y = player.y - 48;
-    setStatus("Second serve: aim, then left/right click");
+    setStatus(playerServePrompt(true));
   } else {
     ball.x = cpu.x;
     ball.y = cpu.y - 48;
@@ -680,6 +693,10 @@ function setSelectedShot(type) {
   shotButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.shot === selectedShot);
   });
+}
+
+function isTouchOptimized() {
+  return Boolean(coarsePointerQuery?.matches);
 }
 
 function startSwing(actor, style) {
@@ -1679,8 +1696,8 @@ function updateAimFromPointer(event) {
 }
 
 canvas.addEventListener("pointermove", (event) => {
-  // On touch, the right-thumb joystick owns aim. Letting raw canvas touches
-  // also drive aim would yank the reticle around as the player drags.
+  // On touch, only the active right-side aim pad drives the reticle.
+  // The movement thumb can drag without pulling the wall target around.
   if (event.pointerType === "touch") {
     if (event.pointerId === touchAimPointerId) {
       event.preventDefault();
@@ -1692,15 +1709,22 @@ canvas.addEventListener("pointermove", (event) => {
 });
 
 canvas.addEventListener("pointerdown", (event) => {
-  // Touches on the canvas should not fire shots — the on-screen Regular/Kill
-  // buttons are the dedicated fire controls on mobile.
+  // On mobile, the right side of the court is the aim-and-fire pad. This keeps
+  // the game playable with two thumbs: left thumb moves, right thumb aims and
+  // releases the selected shot.
   if (event.pointerType === "touch") {
     const rect = canvas.getBoundingClientRect();
     const isRightSide = event.clientX > rect.left + rect.width * 0.42;
     if (isRightSide) {
       event.preventDefault();
       touchAimPointerId = event.pointerId;
+      mobileTouchShot.pointerId = event.pointerId;
+      mobileTouchShot.shot = selectedShot;
+      mobileTouchShot.active = true;
       updateAimFromPointer(event);
+      if (selectedShot === "kill") {
+        startKillCharge("touchpad");
+      }
       try {
         canvas.setPointerCapture(event.pointerId);
       } catch (_) {
@@ -1723,7 +1747,21 @@ canvas.addEventListener("pointerdown", (event) => {
 
 canvas.addEventListener("pointerup", (event) => {
   if (event.pointerType === "touch") {
-    if (event.pointerId === touchAimPointerId) touchAimPointerId = null;
+    if (event.pointerId === touchAimPointerId) {
+      event.preventDefault();
+      updateAimFromPointer(event);
+      touchAimPointerId = null;
+      if (mobileTouchShot.active && mobileTouchShot.pointerId === event.pointerId) {
+        const shot = mobileTouchShot.shot;
+        mobileTouchShot.active = false;
+        mobileTouchShot.pointerId = null;
+        if (shot === "kill") {
+          releaseKillCharge("touchpad");
+        } else {
+          swingPlayer(shot);
+        }
+      }
+    }
     return;
   }
   if (event.button === 2) {
@@ -1735,6 +1773,11 @@ canvas.addEventListener("pointerup", (event) => {
 canvas.addEventListener("pointercancel", (event) => {
   if (event.pointerType === "touch") {
     if (event.pointerId === touchAimPointerId) touchAimPointerId = null;
+    if (mobileTouchShot.pointerId === event.pointerId) {
+      mobileTouchShot.active = false;
+      mobileTouchShot.pointerId = null;
+    }
+    if (killCharge.source === "touchpad") cancelKillCharge();
     return;
   }
   if (killCharge.source === "mouse") cancelKillCharge();
@@ -1796,6 +1839,11 @@ shotButtons.forEach((button) => {
     // Kill is press-and-hold to charge. Use pointer events so a single handler
     // works for mouse, touch, and pen.
     button.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "touch" && isTouchOptimized()) {
+        event.preventDefault();
+        setSelectedShot("kill");
+        return;
+      }
       event.preventDefault();
       try {
         button.setPointerCapture(event.pointerId);
@@ -1806,6 +1854,7 @@ shotButtons.forEach((button) => {
       startKillCharge("button");
     });
     const release = (event) => {
+      if (event.pointerType === "touch" && isTouchOptimized()) return;
       if (killCharge.source !== "button") return;
       event.preventDefault();
       button.classList.remove("charging");
@@ -1824,7 +1873,14 @@ shotButtons.forEach((button) => {
     });
     // The button's default click would still fire on quick taps; suppress it
     // because pointerup already handled the charge release.
-    button.addEventListener("click", (event) => event.preventDefault());
+    button.addEventListener("click", (event) => {
+      if (isTouchOptimized()) {
+        event.preventDefault();
+        setSelectedShot("kill");
+        return;
+      }
+      event.preventDefault();
+    });
   } else {
     button.addEventListener("pointerdown", (event) => {
       if (event.pointerType !== "touch") return;
@@ -1833,11 +1889,19 @@ shotButtons.forEach((button) => {
       window.setTimeout(() => {
         delete button.dataset.touchFired;
       }, 350);
-      swingPlayer(shot);
+      if (isTouchOptimized()) {
+        setSelectedShot(shot);
+      } else {
+        swingPlayer(shot);
+      }
     });
     button.addEventListener("click", () => {
       if (button.dataset.touchFired) return;
-      swingPlayer(shot);
+      if (isTouchOptimized()) {
+        setSelectedShot(shot);
+      } else {
+        swingPlayer(shot);
+      }
     });
   }
 });

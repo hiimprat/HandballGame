@@ -399,7 +399,7 @@ kbd {
   }
 
   .joystick--aim {
-    right: max(10px, env(safe-area-inset-right));
+    display: none;
   }
 
   .joystick__base {
@@ -455,6 +455,9 @@ kbd {
 
   .shotbar button .mobile-control {
     display: inline-grid;
+    margin-top: 5px;
+    width: max-content;
+    justify-self: center;
   }
 
   .restart-btn {
@@ -476,6 +479,6 @@ kbd {
   }
 
   .joystick--aim {
-    right: 8px;
+    display: none;
   }
 }
